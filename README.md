@@ -19,12 +19,19 @@ When loaded into an LLM's context, this skill provides:
 
 ## Usage
 
-**Claude Code:**
+**Claude Code (install as skill):**
 ```
-claude skill install mfkl/libvlc-skill
+claude install-skill mfkl/libvlc-skill
 ```
 
+**Claude Code (manual):** Copy `SKILL.md` and `libvlc-skill.md` into `~/.claude/skills/libvlc/` or `.claude/skills/libvlc/` in your project.
+
 **Other tools:** Add `libvlc-skill.md` to your project's context or documentation directory so your AI assistant can reference it.
+
+## Structure
+
+- `SKILL.md` — Entrypoint with frontmatter for Claude Code skill discovery
+- `libvlc-skill.md` — Full reference document (~3600 lines) with API signatures, code examples, and patterns
 
 ## Version coverage
 
