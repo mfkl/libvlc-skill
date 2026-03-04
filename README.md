@@ -19,12 +19,19 @@ When loaded into an LLM's context, this skill provides:
 
 ## Usage
 
-**Claude Code (install as skill):**
-```
-claude install-skill mfkl/libvlc-skill
+**Claude Code (personal, all projects):**
+```bash
+mkdir -p ~/.claude/skills/libvlc
+curl -sL https://raw.githubusercontent.com/mfkl/libvlc-skill/main/SKILL.md -o ~/.claude/skills/libvlc/SKILL.md
+curl -sL https://raw.githubusercontent.com/mfkl/libvlc-skill/main/libvlc-skill.md -o ~/.claude/skills/libvlc/libvlc-skill.md
 ```
 
-**Claude Code (manual):** Copy `SKILL.md` and `libvlc-skill.md` into `~/.claude/skills/libvlc/` or `.claude/skills/libvlc/` in your project.
+**Claude Code (project-scoped):**
+```bash
+mkdir -p .claude/skills/libvlc
+curl -sL https://raw.githubusercontent.com/mfkl/libvlc-skill/main/SKILL.md -o .claude/skills/libvlc/SKILL.md
+curl -sL https://raw.githubusercontent.com/mfkl/libvlc-skill/main/libvlc-skill.md -o .claude/skills/libvlc/libvlc-skill.md
+```
 
 **Other tools:** Add `libvlc-skill.md` to your project's context or documentation directory so your AI assistant can reference it.
 
