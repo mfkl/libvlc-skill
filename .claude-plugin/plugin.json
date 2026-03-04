@@ -1,0 +1,10 @@
+{
+  "name": "libvlc",
+  "description": "Expert knowledge of the libvlc C API (3.x and 4.x) for VLC-based media playback, streaming, and transcoding",
+  "version": "1.0.0",
+  "author": {
+    "name": "Martin Finkel"
+  },
+  "repository": "https://github.com/mfkl/libvlc-skill",
+  "license": "MIT"
+}
