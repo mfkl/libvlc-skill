@@ -1,8 +1,8 @@
 # LibVLC — LLM Skill Document
 
-> **Version scope: libvlc 3.x** (VLC 3.0.x series). All API signatures, behavior descriptions, and code examples in this document target the **3.x** release line. LibVLC 4.x introduces breaking API changes (new rendering pipeline, different callback signatures, removed/renamed functions) that are **not covered here**. If a user is working with libvlc 4.x, warn them that this reference may not apply and suggest consulting the 4.x headers directly.
+> **Version scope: libvlc 3.x and 4.x.** This document covers both the stable **3.x** release line (VLC 3.0.x) and the **4.x** release line (VLC 4.0+). Where APIs are identical, no version marker is shown. Where they differ, inline markers indicate the version: `[3.x]` for 3.x-only APIs, `[4.x]` for 4.x-only APIs, and `[4.x change]` for APIs whose signatures changed. When generating code, **ask the user which version they target** if not already clear from context.
 
-You are an expert assistant for developers using **libvlc 3.x** — the multimedia framework behind VLC media player. You help with API usage, code generation, debugging, and architecture decisions across all supported languages and platforms.
+You are an expert assistant for developers using **libvlc** — the multimedia framework behind VLC media player. You help with API usage, code generation, debugging, and architecture decisions across all supported languages and platforms.
 
 ## How to Use This Document
 
@@ -11,16 +11,15 @@ You are an expert assistant for developers using **libvlc 3.x** — the multimed
 - **Debugging**: Jump to §8 (Troubleshooting) for known pitfalls and fixes
 - **Platform setup**: Jump to §6 (Platform Integration) for OS/framework-specific embedding
 - **Streaming**: Jump to §7 (Streaming & Transcoding) for sout chains and Chromecast
+- **Migrating 3.x → 4.x**: Jump to §13 (Migration Guide) for a concise mapping table
 
-### ⚠️ LibVLC 4.x Warning
+### Version Markers
 
-This document covers **libvlc 3.x only**. LibVLC 4.x (used by LibVLCSharp master, Unity plugin, and upcoming VLC 4.0) has significant breaking changes including:
-
-- **New rendering pipeline** — GPU-accelerated output callbacks replace the CPU-copy video callbacks documented here
-- **Changed/removed functions** — many function signatures differ; some 3.x APIs are removed entirely
-- **Different binding APIs** — LibVLCSharp 4.x, for example, introduces `MediaConfiguration` and new rendering APIs not present in 3.x
-
-If the user mentions libvlc 4.x, VLC 4, LibVLCSharp master branch, or Unity VLC plugin, **warn them** that the API guidance in this document may not apply and recommend consulting the 4.x headers or binding documentation directly.
+Throughout this document:
+- **No marker** — API is the same in both 3.x and 4.x
+- **`[3.x]`** — Only available in libvlc 3.x (removed or replaced in 4.x)
+- **`[4.x]`** — New in libvlc 4.x (not available in 3.x)
+- **`[4.x change]`** — Exists in both versions but the signature changed in 4.x
 
 ---
 
@@ -82,16 +81,36 @@ Every libvlc object uses manual reference counting:
 **In bindings:** Varies — C# uses `IDisposable`, Python uses GC integration, Java requires explicit `release()`.
 
 ```c
-// C lifecycle
+// C lifecycle — libvlc 3.x
 libvlc_instance_t *inst = libvlc_new(0, NULL);
-libvlc_media_t *media = libvlc_media_new_path(inst, "/path/to/file.mp4");
-libvlc_media_player_t *mp = libvlc_media_player_new_from_media(media);
-libvlc_media_release(media);  // Player retains its own reference
+libvlc_media_t *media = libvlc_media_new_path(inst, "/path/to/file.mp4");       // [3.x] inst required
+libvlc_media_player_t *mp = libvlc_media_player_new_from_media(media);           // [3.x]
+libvlc_media_release(media);
 libvlc_media_player_play(mp);
 // ... later ...
+libvlc_media_player_stop(mp);             // [3.x] synchronous
 libvlc_media_player_release(mp);
 libvlc_release(inst);
 ```
+
+```c
+// C lifecycle — libvlc 4.x
+libvlc_instance_t *inst = libvlc_new(0, NULL);
+libvlc_media_t *media = libvlc_media_new_path("/path/to/file.mp4");              // [4.x] no inst
+libvlc_media_player_t *mp = libvlc_media_player_new_from_media(inst, media);     // [4.x] inst required
+libvlc_media_release(media);
+libvlc_media_player_play(mp);
+// ... later ...
+libvlc_media_player_stop_async(mp);       // [4.x] asynchronous, returns int
+libvlc_media_player_release(mp);
+libvlc_release(inst);
+```
+
+**Key 3.x → 4.x lifecycle changes:**
+- Media creation (`_new_path`, `_new_location`, `_new_fd`, `_new_callbacks`, `_new_as_node`) **no longer takes** `libvlc_instance_t*` in 4.x
+- `libvlc_media_player_new_from_media()` **now requires** `libvlc_instance_t*` as first parameter in 4.x
+- `libvlc_media_player_stop()` is replaced by `libvlc_media_player_stop_async()` in 4.x (non-blocking, returns 0 on success)
+- `libvlc_media_list_new()` no longer takes instance in 4.x
 
 ### 2.2 Threading Rules
 
@@ -114,6 +133,90 @@ on_end_reached(event):
 | Python | `queue.Queue()` → process in main loop |
 | Java | `mediaPlayer.submit(() -> mp.media().play(next))` |
 | Go | `go func() { player.Play(next) }()` |
+
+**Toolkit-specific callback→UI thread patterns (C):**
+
+When using a UI toolkit, post VLC events back to the UI thread using the toolkit's mechanism:
+
+```c
+/* GTK — use g_idle_add() to run on the GTK main loop */
+void on_end_vlc(const libvlc_event_t *event, void *data) {
+    g_idle_add((GSourceFunc)handle_end_on_main_thread, NULL);
+}
+
+/* wxWidgets — post a custom event to the wx event loop */
+void OnEndReached_VLC(const libvlc_event_t *event, void *data) {
+    wxCommandEvent evt(vlcEVT_END, wxID_ANY);
+    mainWindow->GetEventHandler()->AddPendingEvent(evt);
+}
+
+/* Qt — use QTimer for polling (avoids cross-thread event posting entirely) */
+QTimer *timer = new QTimer(this);
+connect(timer, &QTimer::timeout, this, [this]() {
+    if (vlcPlayer &&
+        libvlc_media_player_get_state(vlcPlayer) == libvlc_Ended)
+        handleEnd();
+});
+timer->start(100);  /* poll every 100ms */
+
+/* POSIX — use pthread_cond to signal a waiting thread */
+void on_event_vlc(const libvlc_event_t *event, void *data) {
+    pthread_mutex_lock(&lock);
+    event_received = true;
+    pthread_cond_signal(&cond);
+    pthread_mutex_unlock(&lock);
+}
+```
+
+**`[4.x]` Concurrency API — built-in lock/wait/signal:**
+
+LibVLC 4.x provides a built-in mutex+condition variable on the media player, removing the need for external synchronization primitives in many cases:
+
+```c
+// [4.x] Wait for playback to stop using built-in concurrency
+libvlc_media_player_lock(mp);
+while (libvlc_media_player_get_state(mp) != libvlc_Stopped)
+    libvlc_media_player_wait(mp);    // waits on internal condvar
+libvlc_media_player_unlock(mp);
+```
+
+The lock is recursive and safe to call from any thread. Use `libvlc_media_player_signal(mp)` to wake waiting threads from event callbacks. Note: `wait()` may spuriously wake up; always check the condition in a loop.
+
+**`[4.x]` Watch Time API — precise time tracking:**
+
+For UI time displays (seekbar, elapsed time), 4.x provides a high-precision timer instead of polling:
+
+```c
+// [4.x] Watch time — get precise interpolated playback time
+void on_time_update(const libvlc_media_player_time_point_t *pt, void *data) {
+    // WARNING: do NOT call libvlc functions here
+    // Store the point and interpolate from your UI timer
+    memcpy(&last_point, pt, sizeof(*pt));
+}
+void on_time_paused(int64_t system_date_us, void *data) { /* stop UI timer */ }
+
+libvlc_media_player_watch_time(mp,
+    100000,          // min 100ms between updates
+    on_time_update,
+    on_time_paused,
+    NULL,            // on_seek (optional)
+    user_data);
+
+// In your UI timer callback, interpolate to current system time:
+int64_t now = libvlc_clock();
+int64_t ts_us;
+double pos;
+if (libvlc_media_player_time_point_interpolate(&last_point, now, &ts_us, &pos) == 0) {
+    update_seekbar(pos);
+    update_time_label(ts_us / 1000000);  // convert us to seconds
+}
+
+// Get next second boundary for timer scheduling:
+int64_t next = libvlc_media_player_time_point_get_next_date(
+    &last_point, now, ts_us, 1000000 /* 1 second interval */);
+int64_t delay_us = libvlc_delay(next);
+schedule_timer(delay_us);
+```
 
 ### 2.3 Event System
 
@@ -232,13 +335,14 @@ instance = vlc.Instance()
 | `libvlc_new(argc, argv)` | Create instance. `argv` = VLC CLI args (e.g., `"--verbose=2"`). Returns `NULL` on failure. |
 | `libvlc_release(inst)` | Release instance (decrement refcount) |
 | `libvlc_retain(inst)` | Increment refcount |
-| `libvlc_add_intf(inst, name)` | Add interface module (e.g., `"http"` for web control). `NULL` = default. |
-| `libvlc_set_exit_handler(inst, cb, opaque)` | Callback when libvlc wants to exit |
+| `libvlc_add_intf(inst, name)` | `[3.x]` Add interface module (e.g., `"http"` for web control). `NULL` = default. Removed in 4.x. |
+| `libvlc_set_exit_handler(inst, cb, opaque)` | `[3.x]` Callback when libvlc wants to exit. Removed in 4.x. |
 | `libvlc_set_user_agent(inst, name, http)` | Set application name and HTTP User-Agent |
 | `libvlc_set_app_id(inst, id, version, icon)` | Set app ID (e.g., `"com.example.myapp"`) |
 | `libvlc_get_version()` | Returns version string (e.g., `"3.0.18 Vetinari"`) |
 | `libvlc_get_compiler()` | Returns compiler used to build libvlc |
 | `libvlc_get_changeset()` | Returns git changeset hash |
+| `libvlc_abi_version()` | `[4.x]` Returns ABI version string for compatibility checks |
 
 **Constructor arguments** use VLC CLI format: `"--option=value"`. Common:
 ```c
@@ -254,13 +358,15 @@ libvlc_instance_t *inst = libvlc_new(3, args);
 
 #### Creation
 
-| Function | Description |
-|----------|-------------|
-| `libvlc_media_new_location(inst, mrl)` | From URL/MRL (e.g., `"https://..."`, `"rtsp://..."`, `"file:///..."`) |
-| `libvlc_media_new_path(inst, path)` | From local file path (auto-converts to `file://` MRL) |
-| `libvlc_media_new_fd(inst, fd)` | From file descriptor (ownership transfers to libvlc) |
-| `libvlc_media_new_callbacks(inst, open, read, seek, close, opaque)` | From custom bitstream callbacks (in-memory streams, custom protocols) |
-| `libvlc_media_new_as_node(inst, name)` | Create empty node (for playlists) |
+**`[4.x change]`** In 4.x, all media creation functions **drop** the `libvlc_instance_t*` parameter — media is no longer bound to an instance at creation time.
+
+| Function (3.x) | Function (4.x) | Description |
+|----------|----------|-------------|
+| `libvlc_media_new_location(inst, mrl)` | `libvlc_media_new_location(mrl)` | From URL/MRL (e.g., `"https://..."`, `"rtsp://..."`) |
+| `libvlc_media_new_path(inst, path)` | `libvlc_media_new_path(path)` | From local file path (auto-converts to `file://` MRL) |
+| `libvlc_media_new_fd(inst, fd)` | `libvlc_media_new_fd(fd)` | From file descriptor (ownership transfers to libvlc) |
+| `libvlc_media_new_callbacks(inst, open, read, seek, close, opaque)` | `libvlc_media_new_callbacks(open, read, seek, close, opaque)` | From custom bitstream callbacks |
+| `libvlc_media_new_as_node(inst, name)` | `libvlc_media_new_as_node(name)` | Create empty node (for playlists) |
 
 #### Options
 
@@ -277,26 +383,40 @@ libvlc_media_add_option_flag(media, ":option", libvlc_media_option_trusted);
 #### Parsing (Metadata Extraction)
 
 ```c
-// Asynchronous parsing (recommended)
+// [3.x] Asynchronous parsing
 libvlc_media_parse_with_options(media,
-    libvlc_media_parse_local    // or libvlc_media_parse_network, libvlc_media_fetch_local, etc.
-    | libvlc_media_fetch_local, // fetch art too
+    libvlc_media_parse_local | libvlc_media_fetch_local,
     5000);                      // timeout in ms (-1 = infinite)
+```
 
-// Check result
+```c
+// [4.x] Asynchronous parsing — now takes instance, returns int
+int ret = libvlc_media_parse_request(inst, media,
+    libvlc_media_parse_local | libvlc_media_fetch_local,
+    5000);                      // timeout in ms (-1 = infinite)
+// ret: 0 on success, -1 on error
+// Can cancel: libvlc_media_parse_stop(inst, media);
+```
+
+```c
+// Check result (both versions)
 libvlc_media_parsed_status_t status = libvlc_media_get_parsed_status(media);
-// Values: libvlc_media_parsed_status_skipped, _failed, _timeout, _done
+// [3.x] Values: _skipped, _failed, _timeout, _done
+// [4.x] Values: _none, _pending, _skipped, _failed, _timeout, _done, _cancelled
 ```
 
 **Parse options flags (combinable):**
 
-| Flag | Value | Description |
-|------|-------|-------------|
-| `libvlc_media_parse_local` | 0x00 | Parse local files only |
-| `libvlc_media_parse_network` | 0x01 | Parse network streams too |
-| `libvlc_media_fetch_local` | 0x02 | Fetch art from local files |
-| `libvlc_media_fetch_network` | 0x04 | Fetch art from network |
-| `libvlc_media_do_interact` | 0x08 | Allow interaction (login dialogs) |
+| Flag | 3.x Value | 4.x Value | Description |
+|------|-----------|-----------|-------------|
+| `libvlc_media_parse_local` | 0x00 | 0x01 | Parse local files |
+| `libvlc_media_parse_network` | 0x01 | 0x02 | Parse network streams too |
+| `libvlc_media_parse_forced` | — | 0x04 | `[4.x]` Force parsing even if already parsed |
+| `libvlc_media_fetch_local` | 0x02 | 0x08 | Fetch art from local files |
+| `libvlc_media_fetch_network` | 0x04 | 0x10 | Fetch art from network |
+| `libvlc_media_do_interact` | 0x08 | 0x20 | Allow interaction (login dialogs) |
+
+**Note:** Flag values changed between versions. Use the symbolic constants, not raw integers.
 
 #### Metadata
 
@@ -306,14 +426,32 @@ char *title = libvlc_media_get_meta(media, libvlc_meta_Title);
 libvlc_free(title);
 
 libvlc_media_set_meta(media, libvlc_meta_Title, "New Title");
-libvlc_media_save_meta(media);  // Persist to file
+libvlc_media_save_meta(media);       // [3.x] Persist to file
+libvlc_media_save_meta(inst, media); // [4.x change] Now requires instance
 ```
 
 **Meta types:** `Title`, `Artist`, `Genre`, `Copyright`, `Album`, `TrackNumber`, `Description`, `Rating`, `Date`, `Setting`, `URL`, `Language`, `NowPlaying`, `Publisher`, `EncodedBy`, `ArtworkURL`, `TrackID`, `TrackTotal`, `Director`, `Season`, `Episode`, `ShowName`, `Actors`, `AlbumArtist`, `DiscNumber`, `DiscTotal`
 
+**`[4.x]` Meta Extra API** — custom key/value metadata beyond the predefined types:
+```c
+// [4.x] Get/set arbitrary metadata
+char *val = libvlc_media_get_meta_extra(media, "MY_CUSTOM_KEY");
+libvlc_free(val);
+
+libvlc_media_set_meta_extra(media, "MY_CUSTOM_KEY", "value");
+
+// Enumerate all extra meta keys
+char **names;
+unsigned count = libvlc_media_get_meta_extra_names(media, &names);
+for (unsigned i = 0; i < count; i++)
+    printf("Extra: %s\n", names[i]);
+libvlc_media_meta_extra_names_release(names, count);
+```
+
 #### Track Information
 
 ```c
+// [3.x] Track enumeration — flat array
 libvlc_media_track_t **tracks;
 unsigned count = libvlc_media_tracks_get(media, &tracks);
 for (unsigned i = 0; i < count; i++) {
@@ -336,6 +474,27 @@ for (unsigned i = 0; i < count; i++) {
 libvlc_media_tracks_release(tracks, count);
 ```
 
+```c
+// [4.x] Tracklist API — typed tracklist, string IDs, hold/release
+libvlc_media_tracklist_t *tl = libvlc_media_get_tracklist(media, libvlc_track_video);
+size_t count = libvlc_media_tracklist_count(tl);
+for (size_t i = 0; i < count; i++) {
+    libvlc_media_track_t *t = libvlc_media_tracklist_at(tl, i);
+    printf("Video track '%s': %dx%d (codec: %s)\n",
+           t->psz_id, t->video->i_width, t->video->i_height,
+           libvlc_media_get_codec_description(t->i_type, t->i_codec));
+    // t->psz_name: human-readable name (when from media_player)
+    // t->id_stable: true if ID is stable across playback sessions
+    // t->selected: true if currently selected (when from media_player)
+}
+libvlc_media_tracklist_delete(tl);
+
+// To keep a track beyond the tracklist lifetime:
+libvlc_media_track_t *held = libvlc_media_track_hold(t);
+// ... use held ...
+libvlc_media_track_release(held);
+```
+
 #### Statistics
 
 ```c
@@ -352,13 +511,37 @@ libvlc_media_get_stats(media, &stats);
 |----------|-------------|
 | `libvlc_media_get_mrl(media)` | Get MRL string (must free with `libvlc_free`) |
 | `libvlc_media_duplicate(media)` | Clone media object |
-| `libvlc_media_get_state(media)` | Get state: `NothingSpecial`, `Opening`, `Buffering`, `Playing`, `Paused`, `Stopped`, `Ended`, `Error` |
+| `libvlc_media_get_state(media)` | Get state: `NothingSpecial`, `Opening`, `Buffering`, `Playing`, `Paused`, `Stopped`, `Ended`, `Error`. `[4.x]` adds `Stopping`. |
 | `libvlc_media_get_duration(media)` | Duration in ms (-1 if unknown; parse first) |
 | `libvlc_media_get_type(media)` | `unknown`, `file`, `directory`, `disc`, `stream`, `playlist` |
 | `libvlc_media_subitems(media)` | Get sub-items as `libvlc_media_list_t` (for playlists, YouTube URLs, m3u8) |
 | `libvlc_media_slaves_add(media, type, priority, uri)` | Add subtitle/audio slave |
 | `libvlc_media_slaves_get(media, &slaves)` | Get attached slaves |
 | `libvlc_media_retain(media)` / `libvlc_media_release(media)` | Refcounting |
+| `libvlc_media_get_filestat(media, type, &val)` | `[4.x]` Get file stat: type 0 = mtime (epoch), type 1 = size (bytes) |
+| `libvlc_media_get_codec_description(type, fourcc)` | `[4.x]` Get human-readable codec name from fourcc |
+
+**`[4.x]` Thumbnail Request API** — asynchronous thumbnail generation from media (without playing):
+```c
+// Request a thumbnail at a specific time
+libvlc_media_thumbnail_request_t *req =
+    libvlc_media_thumbnail_request_by_time(inst, media,
+        10000000,                          // time in us (10 seconds)
+        libvlc_media_thumbnail_seek_fast,  // or _precise
+        320, 240,                          // width, height
+        false,                             // crop (false = fit)
+        libvlc_picture_Png,                // output format
+        5000);                             // timeout in ms
+// Or by position:
+// libvlc_media_thumbnail_request_by_pos(inst, media, 0.5, ...)
+
+// Listen for libvlc_MediaThumbnailGenerated event on media's event manager
+// The event provides a libvlc_picture_t*
+
+// Cancel / destroy
+libvlc_media_thumbnail_request_cancel(req);
+libvlc_media_thumbnail_request_destroy(req);
+```
 
 ### 3.3 Media Player (`libvlc_media_player_t`)
 
@@ -369,7 +552,8 @@ The largest API surface (~123 C functions).
 | Function | Description |
 |----------|-------------|
 | `libvlc_media_player_new(inst)` | Create empty player |
-| `libvlc_media_player_new_from_media(media)` | Create player pre-loaded with media |
+| `libvlc_media_player_new_from_media(media)` | `[3.x]` Create player pre-loaded with media |
+| `libvlc_media_player_new_from_media(inst, media)` | `[4.x change]` Now requires instance as first parameter |
 | `libvlc_media_player_set_media(mp, media)` | Set/change current media |
 | `libvlc_media_player_get_media(mp)` | Get current media (caller must release) |
 | `libvlc_media_player_release(mp)` | Release player |
@@ -382,22 +566,27 @@ The largest API surface (~123 C functions).
 | `libvlc_media_player_play(mp)` | Start playback (async — returns immediately) |
 | `libvlc_media_player_pause(mp)` | Toggle pause |
 | `libvlc_media_player_set_pause(mp, pause)` | Set pause state (1=pause, 0=resume) |
-| `libvlc_media_player_stop(mp)` | Stop playback (can be slow with network streams — offload to thread) |
-| `libvlc_media_player_is_playing(mp)` | Returns 1 if playing |
-| `libvlc_media_player_get_state(mp)` | Get player state enum |
+| `libvlc_media_player_stop(mp)` | `[3.x]` Stop playback (synchronous, can be slow — offload to thread) |
+| `libvlc_media_player_stop_async(mp)` | `[4.x]` Stop playback (async, returns 0 on success). Listen for `libvlc_MediaPlayerStopping` → `libvlc_MediaPlayerStopped` events. |
+| `libvlc_media_player_is_playing(mp)` | Returns 1 `[3.x]` / `bool` `[4.x]` if playing |
+| `libvlc_media_player_get_state(mp)` | Get player state enum. `[4.x]` adds `libvlc_Stopping` state. |
 | `libvlc_media_player_get_length(mp)` | Duration in ms |
 | `libvlc_media_player_get_time(mp)` | Current time in ms |
-| `libvlc_media_player_set_time(mp, time)` | Seek to time in ms |
-| `libvlc_media_player_get_position(mp)` | Position 0.0–1.0 |
-| `libvlc_media_player_set_position(mp, pos)` | Seek to position |
+| `libvlc_media_player_set_time(mp, time)` | `[3.x]` Seek to time in ms |
+| `libvlc_media_player_set_time(mp, time, b_fast)` | `[4.x change]` Seek to time in ms. `b_fast=true` for fast (imprecise) seek. |
+| `libvlc_media_player_get_position(mp)` | Position 0.0–1.0 (`float` `[3.x]` / `double` `[4.x]`) |
+| `libvlc_media_player_set_position(mp, pos)` | `[3.x]` Seek to position (float) |
+| `libvlc_media_player_set_position(mp, pos, b_fast)` | `[4.x change]` Seek to position (double). `b_fast=true` for fast seek. |
+| `libvlc_media_player_jump_time(mp, time)` | `[4.x]` Relative seek by `time` ms (positive = forward, negative = backward) |
 | `libvlc_media_player_set_rate(mp, rate)` | Playback speed (1.0 = normal, 2.0 = 2x) |
 | `libvlc_media_player_get_rate(mp)` | Get current rate |
 | `libvlc_media_player_will_play(mp)` | Can this media be played? |
-| `libvlc_media_player_is_seekable(mp)` | Is seeking supported? |
-| `libvlc_media_player_can_pause(mp)` | Is pausing supported? |
+| `libvlc_media_player_is_seekable(mp)` | Is seeking supported? (`int` `[3.x]` / `bool` `[4.x]`) |
+| `libvlc_media_player_can_pause(mp)` | Is pausing supported? (`int` `[3.x]` / `bool` `[4.x]`) |
 | `libvlc_media_player_program_scrambled(mp)` | Is stream scrambled? |
 | `libvlc_media_player_next_frame(mp)` | Advance one frame (while paused) |
 | `libvlc_media_player_navigate(mp, nav)` | DVD navigation: `activate`, `up`, `down`, `left`, `right` |
+| `libvlc_media_player_record(mp, enable, dir)` | `[4.x]` Start/stop recording. `dir` = output directory (NULL for default). Listen for `libvlc_MediaPlayerRecordChanged`. |
 
 #### Video Output & Window Embedding
 
@@ -405,9 +594,17 @@ The largest API surface (~123 C functions).
 |----------|----------|-------------|
 | `libvlc_media_player_set_hwnd(mp, hwnd)` | Windows | Set Win32 window handle (`HWND`) |
 | `libvlc_media_player_set_xwindow(mp, xid)` | Linux/X11 | Set X11 window ID |
-| `libvlc_media_player_set_nsobject(mp, view)` | macOS/iOS | Set `NSView*` / `UIView*` |
+| `libvlc_media_player_set_nsobject(mp, view)` | macOS/iOS | Set `NSView*` / `UIView*`. `[4.x]` The view can implement `VLCDrawable` protocol for resize notifications and PictureInPicture support. |
 | `libvlc_media_player_set_android_context(mp, ctx)` | Android | Set Android `AWindow` context |
 | `libvlc_media_player_set_evas_object(mp, obj)` | Tizen/EFL | Set Evas object |
+
+**Windows `WS_CLIPCHILDREN` requirement:** When embedding video in a Win32 window, the parent window **must** have the `WS_CLIPCHILDREN` style set. Without it, GDI repaints will overwrite the video surface, causing flickering or a blank/white area. Set it either in `CreateWindowEx` flags or dynamically before calling `set_hwnd`:
+```c
+LONG style = GetWindowLong(hwnd, GWL_STYLE);
+if (!(style & WS_CLIPCHILDREN))
+    SetWindowLong(hwnd, GWL_STYLE, style | WS_CLIPCHILDREN);
+libvlc_media_player_set_hwnd(mp, hwnd);
+```
 
 #### Video Properties
 
@@ -416,17 +613,27 @@ The largest API surface (~123 C functions).
 | `libvlc_video_get_size(mp, num, &w, &h)` | Get video dimensions for track `num` |
 | `libvlc_video_get_cursor(mp, num, &x, &y)` | Get cursor position in video |
 | `libvlc_video_get_scale(mp)` / `set_scale` | Video scaling factor (0 = auto-fit) |
-| `libvlc_video_get_aspect_ratio(mp)` / `set_aspect_ratio` | Aspect ratio string (e.g., `"16:9"`, `"4:3"`) |
-| `libvlc_video_set_crop_geometry(mp, geo)` | Crop geometry (e.g., `"16:10"`) |
-| `libvlc_video_set_deinterlace(mp, mode)` | Deinterlace mode: `"blend"`, `"linear"`, `"x"`, `"yadif"`, `"yadif2x"`, `""` (disable) |
-| `libvlc_video_get_spu(mp)` / `set_spu` | Subtitle track selection |
-| `libvlc_video_get_spu_count(mp)` | Number of subtitle tracks |
+| `libvlc_video_get_aspect_ratio(mp)` / `set_aspect_ratio` | Aspect ratio string (e.g., `"16:9"`, `"4:3"`, `"fill"`) |
+| `libvlc_video_set_crop_geometry(mp, geo)` | `[3.x]` Crop geometry (e.g., `"16:10"`). Removed in 4.x. |
+| `libvlc_video_set_crop_ratio(mp, num, den)` | `[4.x]` Set crop ratio (e.g., 16,9). Set den=0 to disable. |
+| `libvlc_video_set_crop_window(mp, x, y, w, h)` | `[4.x]` Crop to pixel rectangle |
+| `libvlc_video_set_crop_border(mp, left, right, top, bottom)` | `[4.x]` Crop by border sizes |
+| `libvlc_video_set_deinterlace(mp, mode)` | `[3.x]` Deinterlace mode: `"blend"`, `"linear"`, `"x"`, `"yadif"`, `"yadif2x"`, `""` (disable) |
+| `libvlc_video_set_deinterlace(mp, state, mode)` | `[4.x change]` `state`: -1=auto, 0=off, 1=on. `mode`: filter name or NULL for default. |
 | `libvlc_video_get_spu_delay(mp)` / `set_spu_delay` | Subtitle delay in microseconds |
+| `libvlc_video_get_spu_text_scale(mp)` / `set_spu_text_scale` | `[4.x]` Subtitle text scale factor (0.1–5.0, default 1.0) |
 | `libvlc_video_set_teletext(mp, page)` | Teletext page |
+| `libvlc_video_set_teletext_transparency(mp, b)` / `get_` | `[4.x]` Teletext background transparency |
 | `libvlc_video_take_snapshot(mp, num, path, w, h)` | Save screenshot to file |
-| `libvlc_video_get_track_count(mp)` | Number of video tracks |
-| `libvlc_video_get_track(mp)` / `set_track` | Select video track |
-| `libvlc_video_get_track_description(mp)` | List of track descriptions |
+| `libvlc_video_get_display_fit(mp)` / `set_display_fit` | `[4.x]` Display fit mode: `none`, `contain`, `cover`, `fit_width`, `fit_height` (`libvlc_video_fit_mode_t`) |
+| `libvlc_video_get_video_stereo_mode(mp)` / `set_` | `[4.x]` Video stereo mode: `Auto`, `Stereo`, `LeftEye`, `RightEye`, `SideBySide` |
+| `libvlc_video_set_projection_mode(mp, mode)` | `[4.x]` Force projection mode (rectangular, equirectangular, cubemap) for 360 content |
+| `libvlc_video_unset_projection_mode(mp)` | `[4.x]` Remove forced projection mode |
+| `libvlc_video_get_track_count(mp)` | `[3.x]` Number of video tracks. Use tracklist API in 4.x. |
+| `libvlc_video_get_track(mp)` / `set_track` | `[3.x]` Select video track. Use tracklist API in 4.x. |
+| `libvlc_video_get_track_description(mp)` | `[3.x]` List of track descriptions. Use tracklist API in 4.x. |
+| `libvlc_video_get_spu(mp)` / `set_spu` | `[3.x]` Subtitle track selection. Use tracklist API in 4.x. |
+| `libvlc_video_get_spu_count(mp)` | `[3.x]` Number of subtitle tracks. Use tracklist API in 4.x. |
 
 #### Video Marquee (Text Overlay)
 
@@ -461,15 +668,20 @@ libvlc_video_set_logo_int(mp, libvlc_logo_repeat, -1);     // -1 = infinite
 |----------|-------------|
 | `libvlc_audio_get_volume(mp)` / `set_volume` | Volume 0–200 (100 = normal, >100 = amplify) |
 | `libvlc_audio_get_mute(mp)` / `set_mute` / `toggle_mute` | Mute control |
-| `libvlc_audio_get_track(mp)` / `set_track` | Audio track selection |
-| `libvlc_audio_get_track_count(mp)` | Number of audio tracks |
-| `libvlc_audio_get_track_description(mp)` | List of track descriptions |
+| `libvlc_audio_get_track(mp)` / `set_track` | `[3.x]` Audio track selection. Use tracklist API in 4.x. |
+| `libvlc_audio_get_track_count(mp)` | `[3.x]` Number of audio tracks. Use tracklist API in 4.x. |
+| `libvlc_audio_get_track_description(mp)` | `[3.x]` List of track descriptions. Use tracklist API in 4.x. |
 | `libvlc_audio_get_delay(mp)` / `set_delay` | Audio delay in microseconds |
-| `libvlc_audio_get_channel(mp)` / `set_channel` | Audio channel mode: `Stereo`, `RStereo`, `Left`, `Right`, `Dolbys` |
+| `libvlc_audio_get_channel(mp)` / `set_channel` | `[3.x]` Audio channel mode: `Stereo`, `RStereo`, `Left`, `Right`, `Dolbys` |
+| `libvlc_audio_get_stereomode(mp)` / `set_stereomode` | `[4.x]` Replaces `get/set_channel`. Stereo mode: `Unset`, `Stereo`, `RStereo`, `Left`, `Right`, `Dolbys`, `Mono` |
+| `libvlc_audio_get_mixmode(mp)` / `set_mixmode` | `[4.x]` Audio mix/upmix mode: `Unset`, `Stereo`, `Binaural`, `4_0`, `5_1`, `7_1`. Force channel layout regardless of source. |
 | `libvlc_audio_output_list_get(inst)` | List available audio outputs |
 | `libvlc_audio_output_set(mp, name)` | Set audio output module |
-| `libvlc_audio_output_device_list_get(inst, aout)` | List devices for output |
-| `libvlc_audio_output_device_set(mp, module, device_id)` | Set specific audio device |
+| `libvlc_audio_output_device_list_get(inst, aout)` | `[3.x]` List devices for output. Use `device_enum` in 4.x. |
+| `libvlc_audio_output_device_enum(mp)` | List devices for current output (both versions, preferred in 4.x) |
+| `libvlc_audio_output_device_set(mp, module, device_id)` | `[3.x]` Set specific audio device (3 params) |
+| `libvlc_audio_output_device_set(mp, device_id)` | `[4.x change]` Set audio device (2 params, module param removed) |
+| `libvlc_audio_output_device_get(mp)` | Get current audio device identifier (free with `free()`) |
 
 #### Audio Equalizer
 
@@ -707,7 +919,8 @@ libvlc_media_player_set_role(mp, libvlc_role_Music);
 Thread-safe ordered collection of media items. **Must lock before read/write operations.**
 
 ```c
-libvlc_media_list_t *ml = libvlc_media_list_new(inst);
+libvlc_media_list_t *ml = libvlc_media_list_new(inst);    // [3.x] takes instance
+// libvlc_media_list_t *ml = libvlc_media_list_new();     // [4.x] no instance
 
 libvlc_media_list_lock(ml);       // MUST lock before modifying
 libvlc_media_list_add_media(ml, media1);
@@ -742,8 +955,9 @@ libvlc_media_list_player_play_item_at_index(mlp, 2);
 libvlc_media_list_player_play_item(mlp, specific_media);
 
 libvlc_media_list_player_pause(mlp);
-libvlc_media_list_player_stop(mlp);
-libvlc_media_list_player_is_playing(mlp);
+libvlc_media_list_player_stop(mlp);       // [3.x] synchronous
+// libvlc_media_list_player_stop_async(mlp); // [4.x] asynchronous
+libvlc_media_list_player_is_playing(mlp);  // [3.x] returns int, [4.x] returns bool
 libvlc_media_list_player_get_state(mlp);
 
 libvlc_media_list_player_release(mlp);
@@ -755,63 +969,75 @@ libvlc_media_list_player_release(mlp);
 
 **MediaPlayer events (most common):**
 
-| Event | Extra Data |
-|-------|-----------|
-| `libvlc_MediaPlayerMediaChanged` | `new_media` |
-| `libvlc_MediaPlayerOpening` | — |
-| `libvlc_MediaPlayerBuffering` | `new_cache` (float, 0–100%) |
-| `libvlc_MediaPlayerPlaying` | — |
-| `libvlc_MediaPlayerPaused` | — |
-| `libvlc_MediaPlayerStopped` | — |
-| `libvlc_MediaPlayerForward` | — |
-| `libvlc_MediaPlayerBackward` | — |
-| `libvlc_MediaPlayerEndReached` | — |
-| `libvlc_MediaPlayerEncounteredError` | — |
-| `libvlc_MediaPlayerTimeChanged` | `new_time` (int64_t, ms) |
-| `libvlc_MediaPlayerPositionChanged` | `new_position` (float, 0.0–1.0) |
-| `libvlc_MediaPlayerSeekableChanged` | `new_seekable` (int) |
-| `libvlc_MediaPlayerPausableChanged` | `new_pausable` (int) |
-| `libvlc_MediaPlayerTitleChanged` | `new_title` (int) |
-| `libvlc_MediaPlayerSnapshotTaken` | `psz_filename` (char*) |
-| `libvlc_MediaPlayerLengthChanged` | `new_length` (int64_t) |
-| `libvlc_MediaPlayerVout` | `new_count` (int) |
-| `libvlc_MediaPlayerScrambledChanged` | `new_scrambled` (int) |
-| `libvlc_MediaPlayerESAdded` | `i_type`, `i_id` |
-| `libvlc_MediaPlayerESDeleted` | `i_type`, `i_id` |
-| `libvlc_MediaPlayerESSelected` | `i_type`, `i_id` |
-| `libvlc_MediaPlayerCorked` | — |
-| `libvlc_MediaPlayerUncorked` | — |
-| `libvlc_MediaPlayerMuted` | — |
-| `libvlc_MediaPlayerUnmuted` | — |
-| `libvlc_MediaPlayerAudioVolume` | `volume` (float) |
-| `libvlc_MediaPlayerAudioDevice` | `device` (char*) |
-| `libvlc_MediaPlayerChapterChanged` | `new_chapter` (int) |
+| Event | Extra Data | Notes |
+|-------|-----------|-------|
+| `libvlc_MediaPlayerMediaChanged` | `new_media` | |
+| `libvlc_MediaPlayerOpening` | — | |
+| `libvlc_MediaPlayerBuffering` | `new_cache` (float, 0–100%) | |
+| `libvlc_MediaPlayerPlaying` | — | |
+| `libvlc_MediaPlayerPaused` | — | |
+| `libvlc_MediaPlayerStopped` | — | |
+| `libvlc_MediaPlayerStopping` | — | `[4.x]` Fired before `Stopped` when `stop_async()` begins |
+| `libvlc_MediaPlayerForward` | — | |
+| `libvlc_MediaPlayerBackward` | — | |
+| `libvlc_MediaPlayerEndReached` | — | |
+| `libvlc_MediaPlayerEncounteredError` | — | |
+| `libvlc_MediaPlayerTimeChanged` | `new_time` (int64_t, ms) | |
+| `libvlc_MediaPlayerPositionChanged` | `new_position` | `[3.x]` float. `[4.x]` double. |
+| `libvlc_MediaPlayerSeekableChanged` | `new_seekable` | |
+| `libvlc_MediaPlayerPausableChanged` | `new_pausable` | |
+| `libvlc_MediaPlayerTitleChanged` | `new_title` (int) | |
+| `libvlc_MediaPlayerSnapshotTaken` | `psz_filename` (char*) | |
+| `libvlc_MediaPlayerLengthChanged` | `new_length` (int64_t) | |
+| `libvlc_MediaPlayerVout` | `new_count` (int) | |
+| `libvlc_MediaPlayerScrambledChanged` | `new_scrambled` (int) | |
+| `libvlc_MediaPlayerESAdded` | `[3.x]` `i_type`, `i_id` (int). `[4.x]` `i_type`, `psz_id` (string). | |
+| `libvlc_MediaPlayerESDeleted` | Same as ESAdded | |
+| `libvlc_MediaPlayerESSelected` | `[3.x]` `i_type`, `i_id`. `[4.x]` `psz_unselected_id`, `psz_selected_id`. | |
+| `libvlc_MediaPlayerESUpdated` | `i_type`, `psz_id` | `[4.x]` Track info changed |
+| `libvlc_MediaPlayerProgramAdded` | `i_id`, `psz_name` | `[4.x]` MPEG-TS program |
+| `libvlc_MediaPlayerProgramDeleted` | `i_id` | `[4.x]` |
+| `libvlc_MediaPlayerProgramUpdated` | `i_id`, `psz_name` | `[4.x]` |
+| `libvlc_MediaPlayerProgramSelected` | `i_unselected_id`, `i_selected_id` | `[4.x]` |
+| `libvlc_MediaPlayerTitleListChanged` | — | `[4.x]` Title list updated |
+| `libvlc_MediaPlayerTitleSelectionChanged` | `title`, `index` | `[4.x]` |
+| `libvlc_MediaPlayerRecordChanged` | `recording` (bool), `psz_recorded_file_path` | `[4.x]` |
+| `libvlc_MediaPlayerCorked` | — | |
+| `libvlc_MediaPlayerUncorked` | — | |
+| `libvlc_MediaPlayerMuted` | — | |
+| `libvlc_MediaPlayerUnmuted` | — | |
+| `libvlc_MediaPlayerAudioVolume` | `volume` (float) | |
+| `libvlc_MediaPlayerAudioDevice` | `device` (char*) | |
+| `libvlc_MediaPlayerChapterChanged` | `new_chapter` (int) | |
 
 **Media events:**
 
-| Event | Extra Data |
-|-------|-----------|
-| `libvlc_MediaMetaChanged` | `meta_type` |
-| `libvlc_MediaSubItemAdded` | `new_child` (media) |
-| `libvlc_MediaDurationChanged` | `new_duration` (int64_t) |
-| `libvlc_MediaParsedChanged` | `new_status` (int) |
-| `libvlc_MediaFreed` | `md` (media) |
-| `libvlc_MediaStateChanged` | `new_state` |
-| `libvlc_MediaSubItemTreeAdded` | `item` (media) |
+| Event | Extra Data | Notes |
+|-------|-----------|-------|
+| `libvlc_MediaMetaChanged` | `meta_type` | |
+| `libvlc_MediaSubItemAdded` | `new_child` (media) | |
+| `libvlc_MediaDurationChanged` | `new_duration` (int64_t) | |
+| `libvlc_MediaParsedChanged` | `new_status` (int) | |
+| `libvlc_MediaFreed` | `md` (media) | `[3.x]` Removed in 4.x. |
+| `libvlc_MediaStateChanged` | `new_state` | `[3.x]` Removed in 4.x. |
+| `libvlc_MediaSubItemTreeAdded` | `item` (media) | |
+| `libvlc_MediaThumbnailGenerated` | `p_thumbnail` (libvlc_picture_t*) | `[4.x]` From thumbnail request |
+| `libvlc_MediaAttachedThumbnailsFound` | `p_thumbnail` (libvlc_picture_t*) | `[4.x]` Embedded artwork |
 
-**MediaList events:** `ItemAdded` (`item`, `index`), `WillAddItem`, `ItemDeleted`, `WillDeleteItem`
+**MediaList events:** `ItemAdded` (`item`, `index`), `WillAddItem`, `ItemDeleted`, `WillDeleteItem`, `EndReached` `[4.x]`
 
 **MediaDiscoverer events:** `Started`, `Ended`
 
 **RendererDiscoverer events:** `ItemAdded` (`item`), `ItemDeleted` (`item`)
 
-**VLM events:** `MediaAdded`, `MediaRemoved`, `MediaChanged`, `MediaInstanceStarted`, `MediaInstanceStopped`, `MediaInstanceStatusInit/Opening/Playing/Pause/End/Error`
+**`[3.x]` VLM events:** `MediaAdded`, `MediaRemoved`, `MediaChanged`, `MediaInstanceStarted`, `MediaInstanceStopped`, `MediaInstanceStatusInit/Opening/Playing/Pause/End/Error` — VLM is removed in 4.x.
 
 ### 3.7 Dialog API (`libvlc_dialog_cbs`)
 
 Handle login prompts, questions, and progress for user interaction:
 
 ```c
+// [3.x] Error callback is part of the struct
 const libvlc_dialog_cbs cbs = {
     .pf_display_error    = on_error,     // (title, text)
     .pf_display_login    = on_login,     // (id, title, text, default_user, ask_store)
@@ -821,8 +1047,23 @@ const libvlc_dialog_cbs cbs = {
     .pf_update_progress  = on_update,    // (id, position, text)
 };
 libvlc_dialog_set_callbacks(inst, &cbs, my_data);
+```
 
-// Respond to dialog:
+```c
+// [4.x change] Error callback is registered separately
+const libvlc_dialog_cbs cbs = {
+    .pf_display_login    = on_login,
+    .pf_display_question = on_question,
+    .pf_display_progress = on_progress,
+    .pf_cancel           = on_cancel,
+    .pf_update_progress  = on_update,
+};
+libvlc_dialog_set_callbacks(inst, &cbs, my_data);
+libvlc_dialog_set_error_callback(inst, on_error, my_data);  // [4.x] separate
+```
+
+```c
+// Respond to dialog (same in both versions):
 libvlc_dialog_post_login(id, username, password, store);
 libvlc_dialog_post_action(id, action_number);  // 1 or 2
 libvlc_dialog_dismiss(id);
@@ -890,7 +1131,9 @@ libvlc_renderer_discoverer_release(rd);
 
 **Renderer flags:** `LIBVLC_RENDERER_CAN_AUDIO` (0x0001), `LIBVLC_RENDERER_CAN_VIDEO` (0x0002)
 
-### 3.10 VLM (Video LAN Manager)
+### 3.10 VLM (Video LAN Manager) `[3.x]`
+
+> **Note:** The VLM API is **removed in libvlc 4.x**. For server-side streaming in 4.x, use the sout (stream output) chain via `libvlc_media_add_option()` instead.
 
 Server-side broadcast/VOD streaming management:
 
@@ -923,13 +1166,231 @@ libvlc_vlm_del_media(inst, "mystream");
 libvlc_vlm_release(inst);
 ```
 
+**VLM transcode with presets and progress tracking (from official DVD ripper sample):**
+
+The VLM API can be used for transcoding with progress monitoring. Define sout transcode strings as presets and track position via polling.
+
+```c
+/* Transcode preset strings */
+// MP4 high quality:
+"#transcode{vcodec=h264,venc=x264{cfr=16},scale=1,acodec=mp4a,ab=160,"
+"channels=2,samplerate=44100}:file{dst=/output.mp4}"
+
+// MP4 low quality:
+"#transcode{vcodec=h264,venc=x264{cfr=40},scale=1,acodec=mp4a,ab=96,"
+"channels=2,samplerate=44100}:file{dst=/output.mp4}"
+
+// OGG high quality (Theora + Vorbis):
+"#transcode{vcodec=theo,venc=theora{quality=9},scale=1,acodec=vorb,ab=160,"
+"channels=2,samplerate=44100}:file{dst=/output.ogg}"
+
+// WebM high quality (VP8 + Vorbis):
+"#transcode{vcodec=VP80,vb=2000,scale=1,acodec=vorb,ab=160,"
+"channels=2,samplerate=44100}:file{dst=/output.webm}"
+
+/* Start VLM broadcast and track progress */
+libvlc_vlm_add_broadcast(inst, "transcode_job",
+    "file:///input.mp4",  /* input */
+    sout_string,          /* transcode preset from above */
+    0, NULL, 1, 0);       /* enabled=1, loop=0 */
+libvlc_vlm_play_media(inst, "transcode_job");
+
+/* Monitor progress via VLM events */
+libvlc_event_manager_t *em = libvlc_vlm_get_event_manager(inst);
+libvlc_event_attach(em, libvlc_VlmMediaInstanceStatusEnd, on_done, NULL);
+libvlc_event_attach(em, libvlc_VlmMediaInstanceStatusError, on_error, NULL);
+
+/* Or poll position (0.0 to 1.0) for progress bars */
+float pos = libvlc_vlm_get_media_instance_position(inst, "transcode_job", 0);
+// pos < 0 means not started; 0.0-1.0 = progress; >= 1.0 = finished
+```
+
+### 3.11 Tracklist API (Player-side) `[4.x]`
+
+In 4.x, track selection uses the new tracklist API instead of the `get_track`/`set_track`/`get_track_description` functions:
+
+```c
+// Get all audio tracks from the player
+libvlc_media_tracklist_t *tl =
+    libvlc_media_player_get_tracklist(mp, libvlc_track_audio, false);
+    // selected=true to get only selected tracks
+
+size_t count = libvlc_media_tracklist_count(tl);
+for (size_t i = 0; i < count; i++) {
+    libvlc_media_track_t *t = libvlc_media_tracklist_at(tl, i);
+    printf("Track '%s': %s %s\n",
+           t->psz_id,          // stable string identifier
+           t->psz_name,        // human-readable name
+           t->selected ? "(selected)" : "");
+}
+libvlc_media_tracklist_delete(tl);
+
+// Select a track by reference
+libvlc_media_player_select_track(mp, track);
+
+// Select by string ID
+libvlc_media_player_select_tracks_by_ids(mp, libvlc_track_audio, "audio/0,audio/1");
+
+// Unselect all tracks of a type (e.g., disable all subtitles)
+libvlc_media_player_unselect_track_type(mp, libvlc_track_text);
+
+// Get the currently selected track of a type
+libvlc_media_track_t *sel = libvlc_media_player_get_selected_track(mp, libvlc_track_video);
+if (sel) {
+    printf("Selected: %s\n", sel->psz_id);
+    libvlc_media_track_release(sel);  // must release
+}
+
+// Get a specific track by ID
+libvlc_media_track_t *t = libvlc_media_player_get_track_from_id(mp, "audio/1");
+if (t) {
+    // use t...
+    libvlc_media_track_release(t);
+}
+```
+
+### 3.12 Program API `[4.x]`
+
+For MPEG-TS and multi-program streams, 4.x adds a dedicated program selection API:
+
+```c
+// Get the program list
+libvlc_player_programlist_t *pl = libvlc_media_player_get_programlist(mp);
+size_t count = libvlc_player_programlist_count(pl);
+for (size_t i = 0; i < count; i++) {
+    const libvlc_player_program_t *prog = libvlc_player_programlist_at(pl, i);
+    printf("Program %d: '%s' %s\n",
+           prog->i_group_id, prog->psz_name,
+           prog->b_selected ? "(selected)" : "");
+    // prog->b_scrambled — whether scrambled
+}
+libvlc_player_programlist_delete(pl);
+
+// Select a program by ID
+libvlc_media_player_select_program_id(mp, group_id);
+
+// Get selected/specific program (must release with libvlc_player_program_delete)
+libvlc_player_program_t *prog = libvlc_media_player_get_selected_program(mp);
+// libvlc_player_program_t *prog = libvlc_media_player_get_program_from_id(mp, id);
+if (prog) {
+    printf("Selected program: %s\n", prog->psz_name);
+    libvlc_player_program_delete(prog);
+}
+```
+
+Listen for `libvlc_MediaPlayerProgramAdded/Deleted/Updated/Selected` events.
+
+### 3.13 GPU Rendering Pipeline `[4.x]`
+
+LibVLC 4.x introduces GPU-accelerated video output via `libvlc_video_set_output_callbacks()`. Instead of receiving CPU pixel buffers (the 3.x `vmem` approach), the application provides GPU resources directly.
+
+**Supported engines:**
+
+| Engine | Enum | Platform |
+|--------|------|----------|
+| OpenGL | `libvlc_video_engine_opengl` | Linux, macOS |
+| OpenGL ES 2 | `libvlc_video_engine_gles2` | Android, embedded |
+| Direct3D 11 | `libvlc_video_engine_d3d11` | Windows |
+| Direct3D 9 | `libvlc_video_engine_d3d9` | Windows (legacy) |
+| Android Native Window | `libvlc_video_engine_anw` | Android (via ANativeWindow) |
+| Disable | `libvlc_video_engine_disable` | No video output |
+
+```c
+// Set up GPU rendering (D3D11 example)
+bool setup(void **opaque, const libvlc_video_setup_device_cfg_t *cfg,
+           libvlc_video_setup_device_info_t *out) {
+    // cfg->hardware_decoding: true if hardware decoding is requested
+    // Set up your D3D11 device, return context in *opaque
+    out->d3d11.device_context = my_d3d11_context;
+    return true;
+}
+
+void cleanup(void *opaque) { /* Release GPU resources */ }
+
+bool update_output(void *opaque, const libvlc_video_render_cfg_t *cfg,
+                   libvlc_video_output_cfg_t *out) {
+    // cfg->width, cfg->height — requested size
+    // cfg->colorspace, cfg->primaries, cfg->transfer — color info
+    // out->dxgi_format, out->d3d11_format — set output format
+    // out->orientation — set orientation
+    return true;
+}
+
+void swap(void *opaque) { /* Present frame to display */ }
+
+libvlc_video_set_output_callbacks(mp,
+    libvlc_video_engine_d3d11,
+    setup, cleanup, NULL /*window_cb*/,
+    update_output, swap,
+    NULL /*makeCurrent*/, NULL /*getProcAddress*/,
+    NULL /*metadata*/, NULL /*select_plane*/,
+    my_opaque);
+```
+
+**Key concepts:**
+- `update_output` is called when video size/format changes — resize your swap chain here
+- `swap` is called each time a frame is ready to display
+- For OpenGL: provide `makeCurrent` and `getProcAddress` callbacks
+- For Android: use the helper `libvlc_video_set_anw_callbacks()` instead
+- HDR metadata available via `libvlc_video_frame_hdr10_metadata_t` in the metadata callback
+- Color space info: `libvlc_video_color_space_t`, `libvlc_video_color_primaries_t`, `libvlc_video_transfer_func_t`
+
+### 3.14 A-B Loop API `[4.x]`
+
+```c
+// Set A point at current time, then B point at another time
+libvlc_media_player_set_abloop(mp, libvlc_abloop_a, current_time_ms);
+libvlc_media_player_set_abloop(mp, libvlc_abloop_b, later_time_ms);
+
+// Query current loop state
+libvlc_abloop_t state;
+int64_t a_time, b_time;
+int ret = libvlc_media_player_get_abloop(mp, &state, &a_time, &b_time);
+// state: libvlc_abloop_none, libvlc_abloop_a, libvlc_abloop_b
+
+// Clear loop
+libvlc_media_player_set_abloop(mp, libvlc_abloop_none, 0);
+```
+
+### 3.15 Picture API `[4.x]`
+
+The `libvlc_picture_t` type represents an image (thumbnail, artwork) with reference counting:
+
+```c
+// Received from MediaThumbnailGenerated event or thumbnail request
+libvlc_picture_t *pic = event->u.media_thumbnail_generated.p_thumbnail;
+libvlc_picture_retain(pic);  // hold beyond event scope
+
+// Properties
+unsigned w = libvlc_picture_get_width(pic);
+unsigned h = libvlc_picture_get_height(pic);
+libvlc_picture_type_t type = libvlc_picture_type(pic);
+// Types: libvlc_picture_Argb, _Png, _Jpg, _WebP, _Rgba
+libvlc_time_t time = libvlc_picture_get_time(pic);  // ms
+
+// Get raw buffer
+size_t buf_size;
+const unsigned char *buf = libvlc_picture_get_buffer(pic, &buf_size);
+// For Argb/Rgba types: stride = libvlc_picture_get_stride(pic)
+
+// Save to file
+libvlc_picture_save(pic, "/path/to/output.png");
+
+libvlc_picture_release(pic);
+
+// Picture list (e.g., from attached thumbnails)
+size_t count = libvlc_picture_list_count(list);
+libvlc_picture_t *p = libvlc_picture_list_at(list, 0);
+libvlc_picture_list_destroy(list);
+```
+
 ---
 
 ## §4. Language Binding Patterns
 
 ### 4.1 C# — LibVLCSharp (Official, Cross-platform)
 
-> **Targets LibVLCSharp 3.x** (NuGet `LibVLCSharp` 3.x + `VideoLAN.LibVLC.*` 3.x). The master branch of LibVLCSharp targets libvlc 4.x and has a different API surface.
+> **Targets LibVLCSharp 3.x** (NuGet `LibVLCSharp` 3.x + `VideoLAN.LibVLC.*` 3.x) for the 3.x examples below. The master branch of LibVLCSharp targets libvlc 4.x with a different API surface (e.g., `MediaConfiguration`, new rendering APIs, async stop).
 
 **Package:** `VideoLAN.LibVLC.Forms` (Xamarin), `LibVLCSharp` (core), `VideoLAN.LibVLC.Windows/Mac/...` (platform-specific)
 
@@ -1389,6 +1850,7 @@ These demonstrate that LibVLCSharp is not limited to C# — any .NET-compatible 
 ### 5.1 Play a Local File
 
 ```c
+// [3.x]
 libvlc_instance_t *inst = libvlc_new(0, NULL);
 libvlc_media_t *media = libvlc_media_new_path(inst, "/path/to/file.mp4");
 libvlc_media_player_t *mp = libvlc_media_player_new_from_media(media);
@@ -1400,10 +1862,26 @@ libvlc_media_player_release(mp);
 libvlc_release(inst);
 ```
 
+```c
+// [4.x]
+libvlc_instance_t *inst = libvlc_new(0, NULL);
+libvlc_media_t *media = libvlc_media_new_path("/path/to/file.mp4");        // no inst
+libvlc_media_player_t *mp = libvlc_media_player_new_from_media(inst, media); // inst first
+libvlc_media_release(media);
+libvlc_media_player_play(mp);
+// ... wait or handle events ...
+libvlc_media_player_stop_async(mp);  // async
+libvlc_media_player_release(mp);
+libvlc_release(inst);
+```
+
 ### 5.2 Play a Network Stream
 
 ```c
+// [3.x]
 libvlc_media_t *media = libvlc_media_new_location(inst, "https://example.com/stream.m3u8");
+// [4.x]
+// libvlc_media_t *media = libvlc_media_new_location("https://example.com/stream.m3u8");
 libvlc_media_add_option(media, ":network-caching=1000");
 // Same as local file from here
 ```
@@ -1411,13 +1889,12 @@ libvlc_media_add_option(media, ":network-caching=1000");
 ### 5.3 Get Media Metadata
 
 ```c
+// [3.x]
 libvlc_media_t *media = libvlc_media_new_path(inst, path);
-// Must parse first!
 libvlc_media_parse_with_options(media, libvlc_media_parse_local | libvlc_media_fetch_local, 5000);
 // Wait for parsing (event or poll):
-while (libvlc_media_get_parsed_status(media) != libvlc_media_parsed_status_done) {
+while (libvlc_media_get_parsed_status(media) != libvlc_media_parsed_status_done)
     usleep(100000);
-}
 
 char *title = libvlc_media_get_meta(media, libvlc_meta_Title);
 char *artist = libvlc_media_get_meta(media, libvlc_meta_Artist);
@@ -1433,16 +1910,133 @@ if (artist) libvlc_free(artist);
 libvlc_media_release(media);
 ```
 
-### 5.4 Extract Thumbnail / Screenshot
-
-**Method 1: Snapshot (requires video output)**
 ```c
-libvlc_media_player_play(mp);
-// Wait until playing...
-libvlc_video_take_snapshot(mp, 0, "/path/to/thumb.png", 320, 0);  // 0 = auto height
+// [4.x]
+libvlc_media_t *media = libvlc_media_new_path(path);         // no inst
+libvlc_media_parse_request(inst, media,                       // inst required here
+    libvlc_media_parse_local | libvlc_media_fetch_local, 5000);
+while (libvlc_media_get_parsed_status(media) != libvlc_media_parsed_status_done)
+    usleep(100000);
+
+char *title = libvlc_media_get_meta(media, libvlc_meta_Title);
+int64_t duration = libvlc_media_get_duration(media);
+
+// Use tracklist API instead of tracks_get
+libvlc_media_tracklist_t *tl = libvlc_media_get_tracklist(media, libvlc_track_video);
+for (size_t i = 0; i < libvlc_media_tracklist_count(tl); i++) {
+    libvlc_media_track_t *t = libvlc_media_tracklist_at(tl, i);
+    printf("Video: %dx%d codec=%s\n", t->video->i_width, t->video->i_height,
+           libvlc_media_get_codec_description(t->i_type, t->i_codec));
+}
+libvlc_media_tracklist_delete(tl);
+
+if (title) libvlc_free(title);
+libvlc_media_release(media);
 ```
 
-**Method 2: Video callbacks (headless)**
+### 5.4 Extract Thumbnail / Screenshot
+
+**Method 1: Event-based snapshot (recommended, from official `vlc-thumb.c`):**
+
+Seek to 30% position, wait for the seek to complete via events, then take a snapshot. Uses pthread synchronization with a timeout to avoid hanging on broken files.
+
+```c
+#include <vlc/vlc.h>
+#include <pthread.h>
+#include <time.h>
+
+#define THUMBNAIL_POSITION  0.30f   /* 30% into the video */
+#define THUMBNAIL_TIMEOUT   5       /* seconds */
+
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  wait_cond;
+static bool done;
+
+static void callback(const libvlc_event_t *ev, void *param) {
+    (void)param;
+    pthread_mutex_lock(&lock);
+    switch (ev->type) {
+    case libvlc_MediaPlayerPositionChanged:
+        if (ev->u.media_player_position_changed.new_position
+                < THUMBNAIL_POSITION * 0.9f)
+            break;  /* not there yet */
+        /* fall through */
+    case libvlc_MediaPlayerSnapshotTaken:
+        done = true;
+        pthread_cond_signal(&wait_cond);
+        break;
+    default:
+        break;
+    }
+    pthread_mutex_unlock(&lock);
+}
+
+static int wait_with_timeout(const char *error_msg) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_sec += THUMBNAIL_TIMEOUT;
+
+    pthread_mutex_lock(&lock);
+    int ret = done ? 0 : pthread_cond_timedwait(&wait_cond, &lock, &ts);
+    pthread_mutex_unlock(&lock);
+    if (ret) fprintf(stderr, "%s (timeout)\n", error_msg);
+    return ret;
+}
+
+int make_thumbnail(const char *input, const char *output_png, int width) {
+    static const char *args[] = {
+        "--intf", "dummy", "--vout", "dummy",
+        "--no-audio", "--no-video-title-show",
+        "--no-stats", "--no-sub-autodetect-file",
+        "--no-snapshot-preview"
+    };
+    libvlc_instance_t *vlc = libvlc_new(sizeof(args)/sizeof(*args), args);
+    libvlc_media_t *m = libvlc_media_new_path(vlc, input);
+    libvlc_media_player_t *mp = libvlc_media_player_new_from_media(m);
+
+    /* Initialize condition variable with monotonic clock */
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&wait_cond, &attr);
+    pthread_condattr_destroy(&attr);
+
+    libvlc_media_player_play(mp);
+
+    /* Step 1: Seek to position, wait via event */
+    libvlc_event_manager_t *em = libvlc_media_player_event_manager(mp);
+    libvlc_event_attach(em, libvlc_MediaPlayerPositionChanged, callback, NULL);
+    done = false;
+    libvlc_media_player_set_position(mp, THUMBNAIL_POSITION);
+    int err = wait_with_timeout("Seek failed");
+    libvlc_event_detach(em, libvlc_MediaPlayerPositionChanged, callback, NULL);
+
+    if (!err) {
+        /* Step 2: Take snapshot, wait for completion */
+        libvlc_event_attach(em, libvlc_MediaPlayerSnapshotTaken, callback, NULL);
+        done = false;
+        libvlc_video_take_snapshot(mp, 0, output_png, width, 0);
+        err = wait_with_timeout("Snapshot failed");
+        libvlc_event_detach(em, libvlc_MediaPlayerSnapshotTaken, callback, NULL);
+    }
+
+    libvlc_media_player_stop(mp);
+    libvlc_media_player_release(mp);
+    libvlc_media_release(m);
+    libvlc_release(vlc);
+    pthread_cond_destroy(&wait_cond);
+    return err;
+}
+```
+
+**Key points:**
+- Use `--vout=dummy` and `--no-audio` to suppress video/audio output (headless)
+- `--no-snapshot-preview` prevents blending the snapshot into the dummy vout
+- Always attach/detach events in pairs, and use timeouts to avoid hanging
+- `PositionChanged` fires continuously during seeking; wait until within 90% of target before proceeding
+- The output filename **must** end in `.png` (VLC uses the extension to detect format)
+
+**Method 2: Video callbacks (headless, custom processing):**
 ```c
 // Set up video callbacks (see §3.3) with desired resolution
 // In display callback, save the first frame, then stop
@@ -1774,10 +2368,37 @@ player.video_set_spu(-1)  # Disable
 player.add_slave(vlc.MediaSlaveType.subtitle, "file:///path/to/subs.srt", True)
 ```
 
+**`[4.x]` Track selection with tracklist API (C):**
+```c
+// Get all audio tracks
+libvlc_media_tracklist_t *tl =
+    libvlc_media_player_get_tracklist(mp, libvlc_track_audio, false);
+for (size_t i = 0; i < libvlc_media_tracklist_count(tl); i++) {
+    libvlc_media_track_t *t = libvlc_media_tracklist_at(tl, i);
+    printf("Audio '%s': %s %s\n", t->psz_id, t->psz_name,
+           t->selected ? "(selected)" : "");
+}
+
+// Select a specific track
+libvlc_media_player_select_track(mp, libvlc_media_tracklist_at(tl, 1));
+libvlc_media_tracklist_delete(tl);
+
+// Disable all subtitles
+libvlc_media_player_unselect_track_type(mp, libvlc_track_text);
+
+// Select by string ID
+libvlc_media_player_select_tracks_by_ids(mp, libvlc_track_audio, "audio/0");
+
+// Add external subtitle (same in both versions)
+libvlc_media_player_add_slave(mp, libvlc_media_slave_type_subtitle,
+    "file:///path/to/subs.srt", true);
+```
+
 **Key points:**
-- Track IDs come from the `i_id` field of `libvlc_track_description_t`, NOT sequential indices
-- Track ID `-1` typically means "disable" (no audio / no subtitle)
-- Track ID `0` in audio often means "disable" depending on the binding
+- `[3.x]` Track IDs come from the `i_id` field of `libvlc_track_description_t`, NOT sequential indices
+- `[3.x]` Track ID `-1` typically means "disable" (no audio / no subtitle)
+- `[4.x]` Track IDs are strings (`psz_id`), e.g., `"audio/0"`, `"video/0"`, `"spu/0"`
+- `[4.x]` Use `unselect_track_type()` to disable all tracks of a type
 - `add_slave()` can add external subtitles or audio tracks **during playback** — the `select` parameter (`true`) auto-selects the new track
 - Subtitle and audio delays are in **microseconds** and reset when media changes
 
@@ -2015,17 +2636,207 @@ videoView.MediaPlayer.Play(media);
 using var libVLC = new LibVLC("--aout=winstore");
 ```
 
-**Win32 (C):**
+**Win32 (C) — Full player with drag-and-drop and aspect ratio control:**
+
+Based on the official VLC sample (`doc/libvlc/win_player.c`). Key points: use `WS_CLIPCHILDREN` on the parent window to prevent GDI from painting over the video surface, and use `DragAcceptFiles` for drag-and-drop media loading.
+
 ```c
-libvlc_media_player_set_hwnd(mp, (void *)GetActiveWindow());
+#include <windows.h>
+#include <vlc/vlc.h>
+
+struct vlc_context {
+    libvlc_instance_t     *p_libvlc;
+    libvlc_media_player_t *p_mediaplayer;
+};
+
+static LRESULT CALLBACK WindowProc(HWND hWnd, UINT message,
+                                   WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_CREATE) {
+        CREATESTRUCT *c = (CREATESTRUCT *)lParam;
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)c->lpCreateParams);
+        return 0;
+    }
+
+    LONG_PTR p_user_data = GetWindowLongPtr(hWnd, GWLP_USERDATA);
+    if (p_user_data == 0)
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    struct vlc_context *ctx = (struct vlc_context *)p_user_data;
+
+    switch (message) {
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+
+        case WM_DROPFILES: {
+            HDROP hDrop = (HDROP)wParam;
+            char file_path[MAX_PATH];
+            libvlc_media_player_stop(ctx->p_mediaplayer);
+
+            if (DragQueryFile(hDrop, 0, file_path, sizeof(file_path))) {
+                libvlc_media_t *p_media = libvlc_media_new_path(
+                    ctx->p_libvlc, file_path);
+                libvlc_media_t *p_old = libvlc_media_player_get_media(
+                    ctx->p_mediaplayer);
+                libvlc_media_player_set_media(ctx->p_mediaplayer, p_media);
+                libvlc_media_release(p_old);
+                libvlc_media_player_play(ctx->p_mediaplayer);
+            }
+            DragFinish(hDrop);
+            return 0;
+        }
+
+        case WM_KEYDOWN:
+            if (tolower(MapVirtualKey((UINT)wParam, 2)) == 's')
+                libvlc_media_player_stop(ctx->p_mediaplayer);
+            break;
+    }
+    return DefWindowProc(hWnd, message, wParam, lParam);
+}
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+                   LPSTR lpCmdLine, int nCmdShow)
+{
+    struct vlc_context Context;
+    Context.p_libvlc = libvlc_new(0, NULL);
+
+    libvlc_media_t *p_media = libvlc_media_new_path(
+        Context.p_libvlc, lpCmdLine);
+    Context.p_mediaplayer = libvlc_media_player_new_from_media(p_media);
+
+    WNDCLASSEX wc = {0};
+    wc.cbSize = sizeof(WNDCLASSEX);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.lpszClassName = "VLCPlayerClass";
+    RegisterClassEx(&wc);
+
+    /* WS_CLIPCHILDREN is REQUIRED — prevents GDI from overpainting the video */
+    HWND hWnd = CreateWindowEx(0, "VLCPlayerClass", "libvlc Demo",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1500, 900,
+        NULL, NULL, hInstance, &Context);
+
+    DragAcceptFiles(hWnd, TRUE);           /* Enable drag-and-drop */
+    libvlc_media_player_set_hwnd(Context.p_mediaplayer, hWnd);
+    ShowWindow(hWnd, nCmdShow);
+    libvlc_media_player_play(Context.p_mediaplayer);
+
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    libvlc_media_player_stop(Context.p_mediaplayer);
+    libvlc_media_release(libvlc_media_player_get_media(Context.p_mediaplayer));
+    libvlc_media_player_release(Context.p_mediaplayer);
+    libvlc_release(Context.p_libvlc);
+    return (int)msg.wParam;
+}
+```
+
+**Win32 with external D3D11 SwapChain (advanced, for UWP/custom rendering):**
+
+Pass a pre-created D3D11 device context and swap chain to libvlc via CLI args. The app owns the swap chain and signals size changes through private data GUIDs. Based on the official `d3d11_swapr.cpp` sample.
+
+```c
+// Key setup (after D3D11CreateDeviceAndSwapChain):
+// 1. Enable multithread protection on the D3D11 device
+ID3D10Multithread *pMultithread;
+d3device->QueryInterface(&IID_ID3D10Multithread, (void **)&pMultithread);
+pMultithread->SetMultithreadProtected(TRUE);
+pMultithread->Release();
+
+// 2. Share the context mutex via private data
+HANDLE d3dctx_mutex = CreateMutexEx(NULL, NULL, 0, SYNCHRONIZE);
+d3dctx->SetPrivateData(GUID_CONTEXT_MUTEX, sizeof(d3dctx_mutex), &d3dctx_mutex);
+
+// 3. Set initial swapchain dimensions via private data
+uint32_t w = width, h = height;
+swapchain->SetPrivateData(GUID_SWAPCHAIN_WIDTH,  sizeof(w), &w);
+swapchain->SetPrivateData(GUID_SWAPCHAIN_HEIGHT, sizeof(h), &h);
+
+// 4. Pass pointers to libvlc as CLI args
+char ctx_arg[64], swap_arg[64];
+sprintf(ctx_arg, "--winrt-d3dcontext=0x%llx", (intptr_t)d3dctx);
+sprintf(swap_arg, "--winrt-swapchain=0x%llx", (intptr_t)swapchain);
+const char *params[] = { ctx_arg, swap_arg };
+libvlc_instance_t *vlc = libvlc_new(2, params);
+
+// 5. On WM_SIZE, update the private data (libvlc reads it to resize output):
+swapchain->SetPrivateData(GUID_SWAPCHAIN_WIDTH,  sizeof(new_w), &new_w);
+swapchain->SetPrivateData(GUID_SWAPCHAIN_HEIGHT, sizeof(new_h), &new_h);
+// DON'T use libvlc_media_player_set_hwnd() with external swapchain
 ```
 
 ### 6.2 macOS / iOS / tvOS
 
-```c
-// Set NSView (macOS) or UIView (iOS)
-libvlc_media_player_set_nsobject(mp, (__bridge void *)myView);
+**macOS AppKit (Objective-C) — Full player:**
+
+Based on the official `appkit_player.m` sample. Uses ARC and `__bridge` casting.
+
+```objc
+#import <Cocoa/Cocoa.h>
+#import <vlc/vlc.h>
+
+@interface AppDelegate : NSObject <NSApplicationDelegate> {
+    libvlc_instance_t *instance;
+    libvlc_media_player_t *player;
+    libvlc_media_t *media;
+}
+@property NSWindow *window;
+@property NSView *view;
+@end
+
+@implementation AppDelegate
+- (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
+    NSWindowStyleMask mask = NSWindowStyleMaskTitled |
+        NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
+        NSWindowStyleMaskClosable;
+    _window = [[NSWindow alloc]
+        initWithContentRect:NSMakeRect(300, 300, 800, 600)
+                  styleMask:mask
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    [_window setTitle:@"LibVLC AppKit Player"];
+    [_window makeKeyAndOrderFront:nil];
+
+    _view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
+    [_window setContentView:_view];
+
+    const char *const vlc_args[] = { "-vv" };
+    instance = libvlc_new(1, vlc_args);
+    player = libvlc_media_player_new(instance);
+
+    NSString *location = [[NSProcessInfo processInfo] arguments][1];
+    media = libvlc_media_new_location(instance, [location UTF8String]);
+    libvlc_media_player_set_media(player, media);
+
+    /* __bridge cast required under ARC */
+    libvlc_media_player_set_nsobject(player, (__bridge void *)_view);
+    libvlc_media_player_play(player);
+}
+@end
+
+int main(int argc, char *argv[]) {
+    AppDelegate *delegate = [[AppDelegate alloc] init];
+    [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    [NSApp setDelegate:delegate];
+    [NSApp activateIgnoringOtherApps:YES];
+    return NSApplicationMain(argc, (const char **)argv);
+}
 ```
+
+**`[4.x]` VLCDrawable protocol (macOS/iOS):**
+
+In libvlc 4.x, the NSView/UIView passed to `set_nsobject()` can optionally implement the `VLCDrawable` protocol, which provides:
+- Resize notifications when the video surface changes
+- PictureInPicture (PiP) support on supported platforms
+- The view manages its own layer hosting for GPU rendering
 
 **LibVLCSharp:**
 ```csharp
@@ -2035,19 +2846,188 @@ libvlc_media_player_set_nsobject(mp, (__bridge void *)myView);
 
 ### 6.3 Linux
 
+**GTK+ (C) — Full player with file chooser:**
+
+Based on the official `gtk_player.c` sample. The video output must be set after the drawing area widget is realized (i.e., has a native X11 window).
+
 ```c
-// X11 window ID
-libvlc_media_player_set_xwindow(mp, (uint32_t)xid);
+// Build: gcc -o gtk_player gtk_player.c `pkg-config --libs --cflags gtk+-2.0 libvlc`
+
+#include <stdlib.h>
+#include <gtk/gtk.h>
+#include <gdk/gdkx.h>
+#include <vlc/vlc.h>
+
+libvlc_media_player_t *media_player;
+libvlc_instance_t *vlc_inst;
+
+/* Set the X11 window ID after the widget has a native window */
+void on_realize(GtkWidget *widget, gpointer data) {
+    libvlc_media_player_set_xwindow(media_player,
+        GDK_WINDOW_XID(gtk_widget_get_window(widget)));
+}
+
+void on_open(GtkWidget *widget, gpointer data) {
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Choose Media",
+        data, GTK_FILE_CHOOSER_ACTION_OPEN,
+        GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
+        GTK_STOCK_OPEN, GTK_RESPONSE_ACCEPT, NULL);
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *uri = gtk_file_chooser_get_uri(GTK_FILE_CHOOSER(dialog));
+        libvlc_media_t *media = libvlc_media_new_location(vlc_inst, uri);
+        libvlc_media_player_set_media(media_player, media);
+        libvlc_media_player_play(media_player);
+        libvlc_media_release(media);
+        g_free(uri);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+int main(int argc, char *argv[]) {
+    gtk_init(&argc, &argv);
+
+    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);
+    g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+
+    GtkWidget *vbox = gtk_vbox_new(FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(window), vbox);
+
+    /* Video drawing area — connect "realize" to set X11 window ID */
+    GtkWidget *player_widget = gtk_drawing_area_new();
+    gtk_box_pack_start(GTK_BOX(vbox), player_widget, TRUE, TRUE, 0);
+
+    vlc_inst = libvlc_new(0, NULL);
+    media_player = libvlc_media_player_new(vlc_inst);
+
+    g_signal_connect(player_widget, "realize", G_CALLBACK(on_realize), NULL);
+
+    gtk_widget_show_all(window);
+    gtk_main();
+
+    libvlc_media_player_release(media_player);
+    libvlc_release(vlc_inst);
+    return 0;
+}
 ```
 
-**GTK:**
-```c
-GtkWidget *drawing_area = gtk_drawing_area_new();
-// After realize:
-GdkWindow *gdk_win = gtk_widget_get_window(drawing_area);
-XID xid = gdk_x11_window_get_xid(gdk_win);
-libvlc_media_player_set_xwindow(mp, xid);
+**Key GTK pattern:** The X11 window ID (`GDK_WINDOW_XID`) is only available after the widget is realized. Always connect the `"realize"` signal and set the window ID there, never before `gtk_widget_show_all()`.
+
+### 6.3b Qt (C++)
+
+**Qt player with cross-platform video embedding:**
+
+Based on the official `QtPlayer` sample. Uses platform-conditional APIs for video embedding and a `QTimer` for polling playback state.
+
+```cpp
+// Build: qmake && make (requires libvlc and Qt5/6 development packages)
+#include <QMainWindow>
+#include <QSlider>
+#include <QPushButton>
+#include <QTimer>
+#include <QFileDialog>
+#include <vlc/vlc.h>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
+
+class VLCPlayer : public QMainWindow {
+    Q_OBJECT
+public:
+    VLCPlayer() {
+        vlcInstance = libvlc_new(0, NULL);
+        vlcPlayer = NULL;
+
+        videoWidget = new QWidget(this);
+        videoWidget->setAutoFillBackground(true);
+        QPalette plt = palette();
+        plt.setColor(QPalette::Window, Qt::black);
+        videoWidget->setPalette(plt);
+
+        slider = new QSlider(Qt::Horizontal);
+        slider->setMaximum(1000);
+        connect(slider, &QSlider::sliderMoved, this, &VLCPlayer::seek);
+
+        /* Poll playback position every 100ms */
+        QTimer *timer = new QTimer(this);
+        connect(timer, &QTimer::timeout, this, &VLCPlayer::updateUI);
+        timer->start(100);
+        // ... layout setup ...
+    }
+
+    ~VLCPlayer() {
+        if (vlcPlayer) {
+            libvlc_media_player_stop(vlcPlayer);
+            libvlc_media_player_release(vlcPlayer);
+        }
+        if (vlcInstance) libvlc_release(vlcInstance);
+    }
+
+    void openFile() {
+        QString file = QFileDialog::getOpenFileName(this, "Open Media");
+        if (file.isEmpty()) return;
+
+        if (vlcPlayer && libvlc_media_player_is_playing(vlcPlayer))
+            stop();
+
+        libvlc_media_t *media = libvlc_media_new_path(vlcInstance,
+            file.toUtf8().constData());
+        vlcPlayer = libvlc_media_player_new_from_media(media);
+        libvlc_media_release(media);
+
+        /* Platform-specific video embedding */
+#if defined(Q_OS_MAC)
+        libvlc_media_player_set_nsobject(vlcPlayer,
+            (void *)videoWidget->winId());
+#elif defined(Q_OS_UNIX)
+        libvlc_media_player_set_xwindow(vlcPlayer, videoWidget->winId());
+#elif defined(Q_OS_WIN)
+        /* WS_CLIPCHILDREN required on Windows */
+        HWND hwnd = (HWND)videoWidget->winId();
+        LONG style = GetWindowLong(hwnd, GWL_STYLE);
+        if (!(style & WS_CLIPCHILDREN))
+            SetWindowLong(hwnd, GWL_STYLE, style | WS_CLIPCHILDREN);
+        libvlc_media_player_set_hwnd(vlcPlayer, hwnd);
+#endif
+        libvlc_media_player_play(vlcPlayer);
+    }
+
+private slots:
+    void updateUI() {
+        if (!vlcPlayer) return;
+        float pos = libvlc_media_player_get_position(vlcPlayer);
+        slider->setValue((int)(pos * 1000.0));
+        if (libvlc_media_player_get_state(vlcPlayer) == libvlc_Ended)
+            stop();
+    }
+
+    void seek(int pos) {
+        if (vlcPlayer)
+            libvlc_media_player_set_position(vlcPlayer, (float)pos / 1000.0);
+    }
+
+    void stop() {
+        if (vlcPlayer) {
+            libvlc_media_player_stop(vlcPlayer);
+            libvlc_media_player_release(vlcPlayer);
+            vlcPlayer = NULL;
+            slider->setValue(0);
+        }
+    }
+
+private:
+    libvlc_instance_t *vlcInstance;
+    libvlc_media_player_t *vlcPlayer;
+    QWidget *videoWidget;
+    QSlider *slider;
+};
 ```
+
+**Key Qt patterns:**
+- Use `QTimer` for polling playback state (position, ended) rather than libvlc events, to stay on the Qt event loop
+- `videoWidget->winId()` returns the native window handle on all platforms
+- On Windows, add `WS_CLIPCHILDREN` to the video widget's window style before setting the HWND
 
 ### 6.4 Android
 
@@ -2527,11 +3507,88 @@ The following functions are deprecated. Always suggest their modern replacements
 | Need | Approach |
 |------|----------|
 | Embedded in native window | `set_hwnd`/`set_xwindow`/`set_nsobject` |
-| Custom rendering / texture | Video callbacks (lock/unlock/display) |
-| Headless (no display) | `--no-video` or video callbacks to `/dev/null` |
-| Off-screen thumbnail | Video callbacks, capture first frame |
+| Custom rendering / texture | `[3.x]` Video callbacks (lock/unlock/display). `[4.x]` GPU output callbacks (`set_output_callbacks`). |
+| Headless (no display) | `--no-video` or video callbacks to `/dev/null`. `[4.x]` `libvlc_video_engine_disable`. |
+| Off-screen thumbnail | `[3.x]` Video callbacks, capture first frame. `[4.x]` Use `libvlc_media_thumbnail_request_by_time()`. |
 | Multiple simultaneous videos | Multiple MediaPlayers, one LibVLC instance |
 
 **"How do I handle the end of playback?"**
 
 All bindings: Listen for `EndReached` / `MediaPlayerEndReached` event. **Always** offload the next action to a different thread — never call libvlc from the callback.
+
+---
+
+## §13. Migration Guide: libVLC 3.x → 4.x
+
+Quick reference for porting 3.x code to 4.x. See inline `[4.x]` / `[4.x change]` markers throughout this document for details.
+
+### Function Signature Changes
+
+| 3.x | 4.x | Notes |
+|-----|-----|-------|
+| `libvlc_media_new_path(inst, path)` | `libvlc_media_new_path(path)` | All `_new_*` media creators drop `inst` |
+| `libvlc_media_new_location(inst, mrl)` | `libvlc_media_new_location(mrl)` | |
+| `libvlc_media_new_fd(inst, fd)` | `libvlc_media_new_fd(fd)` | |
+| `libvlc_media_new_callbacks(inst, ...)` | `libvlc_media_new_callbacks(...)` | |
+| `libvlc_media_new_as_node(inst, name)` | `libvlc_media_new_as_node(name)` | |
+| `libvlc_media_list_new(inst)` | `libvlc_media_list_new()` | |
+| `libvlc_media_player_new_from_media(media)` | `libvlc_media_player_new_from_media(inst, media)` | Swapped: inst added |
+| `libvlc_media_player_stop(mp)` | `libvlc_media_player_stop_async(mp)` | Async, returns int |
+| `libvlc_media_list_player_stop(mlp)` | `libvlc_media_list_player_stop_async(mlp)` | Async |
+| `libvlc_media_player_set_time(mp, t)` | `libvlc_media_player_set_time(mp, t, fast)` | Added `b_fast` |
+| `libvlc_media_player_set_position(mp, p)` | `libvlc_media_player_set_position(mp, p, fast)` | `p` is `double`, added `b_fast` |
+| `libvlc_media_player_get_position(mp)` | Same | Returns `double` (was `float`) |
+| `libvlc_media_parse_with_options(m, f, t)` | `libvlc_media_parse_request(inst, m, f, t)` | Inst added, returns int |
+| `libvlc_media_save_meta(media)` | `libvlc_media_save_meta(inst, media)` | Inst added |
+| `libvlc_video_set_deinterlace(mp, mode)` | `libvlc_video_set_deinterlace(mp, state, mode)` | State: -1/0/1 |
+| `libvlc_audio_output_device_set(mp, mod, id)` | `libvlc_audio_output_device_set(mp, id)` | Module param removed |
+| `libvlc_video_set_crop_geometry(mp, geo)` | `libvlc_video_set_crop_ratio(mp, n, d)` | String → structured |
+
+### Removed APIs (no 4.x equivalent)
+
+| 3.x API | Alternative in 4.x |
+|---------|-------------------|
+| `libvlc_vlm_*()` (entire VLM API) | Use sout chains via `libvlc_media_add_option()` |
+| `libvlc_add_intf(inst, name)` | No equivalent |
+| `libvlc_set_exit_handler(inst, cb, op)` | No equivalent |
+| `libvlc_media_tracks_get/release()` | `libvlc_media_get_tracklist()` + `_delete()` |
+| `libvlc_audio_get_track_description()` | `libvlc_media_player_get_tracklist(mp, audio, false)` |
+| `libvlc_video_get_track_description()` | `libvlc_media_player_get_tracklist(mp, video, false)` |
+| `libvlc_video_get_spu_description()` | `libvlc_media_player_get_tracklist(mp, text, false)` |
+| `libvlc_audio/video_set_track(mp, id)` | `libvlc_media_player_select_track(mp, track)` |
+| `libvlc_video_set_spu(mp, id)` | `libvlc_media_player_select_track(mp, track)` |
+| `libvlc_audio_get/set_channel()` | `libvlc_audio_get/set_stereomode()` |
+| Event: `libvlc_MediaFreed` | No equivalent (use release directly) |
+| Event: `libvlc_MediaStateChanged` | No equivalent (use player state events) |
+
+### New APIs (4.x only)
+
+| API | Purpose | See §  |
+|-----|---------|--------|
+| Tracklist API | String-ID track selection | §3.11 |
+| Program API | MPEG-TS program selection | §3.12 |
+| GPU rendering (`set_output_callbacks`) | D3D11/OpenGL/GLES2 video output | §3.13 |
+| A-B Loop | Loop between two points | §3.14 |
+| Picture API | Image type for thumbnails/art | §3.15 |
+| Thumbnail Request | Async thumbnail generation | §3.2 Media |
+| Watch Time | Precise time interpolation for UI | §2.2 |
+| Concurrency (lock/wait/signal) | Built-in sync primitives | §2.2 |
+| Recording | `media_player_record()` | §3.3 |
+| Display Fit Mode | Contain/cover/fit display modes | §3.3 Video |
+| Audio Mix Mode | Force stereo/5.1/7.1/binaural | §3.3 Audio |
+| Meta Extra | Custom key-value metadata | §3.2 Media |
+| Jump Time | Relative seeking | §3.3 Playback |
+| `parse_stop()` | Cancel parsing | §3.2 Media |
+
+### Type Changes
+
+| What | 3.x | 4.x |
+|------|-----|-----|
+| `get_position()` return | `float` | `double` |
+| `is_playing()` return | `int` | `bool` |
+| `is_seekable()` return | `int` | `bool` |
+| `can_pause()` return | `int` | `bool` |
+| `is_running()` (discoverer) | `int` | `bool` |
+| ES event track ID | `int i_id` | `const char *psz_id` |
+| Position changed event | `float new_position` | `double new_position` |
+| Parse flags | Values: 0x00–0x08 | Values: 0x01–0x20 (renumbered) |
