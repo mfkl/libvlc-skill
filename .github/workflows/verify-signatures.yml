@@ -1,0 +1,92 @@
+name: Verify Skill Signatures
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # daily at 06:00 UTC
+  pull_request:
+    paths:
+      - 'skills/**'
+      - 'tests/**'
+      - '.github/workflows/verify-signatures.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run signature verification
+        id: verify
+        run: node tests/verify-signatures.mjs 2>&1 | tee verify-output.txt
+        continue-on-error: true
+
+      - name: Auto-fix and open PR on failure
+        if: steps.verify.outcome == 'failure' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Run fix mode to append uncovered functions
+          node tests/verify-signatures.mjs --fix 2>&1 | tee fix-output.txt
+
+          # Check if anything changed
+          if git diff --quiet skills/libvlc/libvlc-skill.md; then
+            echo "No auto-fixable changes detected."
+            exit 0
+          fi
+
+          BRANCH="fix/signature-drift-$(date +%Y%m%d)"
+
+          # Check if a PR already exists for today
+          EXISTING=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING already exists for branch $BRANCH, skipping."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add skills/libvlc/libvlc-skill.md
+          git commit -m "fix: update skill document for VLC header changes"
+          git push -u origin "$BRANCH"
+
+          # Build PR body with embedded verification output
+          {
+            echo "## Auto-detected signature drift"
+            echo ""
+            echo "The daily verification found mismatches between the skill document"
+            echo "and current VLC headers. This PR appends newly detected functions"
+            echo "with their raw C signatures."
+            echo ""
+            echo "**Please review** -- raw signatures may need editorial cleanup"
+            echo "(descriptive parameter names, prose context, code examples)."
+            echo ""
+            echo "<details><summary>Verification output (before fix)</summary>"
+            echo ""
+            echo '```'
+            cat verify-output.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "<details><summary>Fix output</summary>"
+            echo ""
+            echo '```'
+            cat fix-output.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+          } > pr-body.txt
+
+          gh pr create \
+            --title "fix: signature drift detected $(date +%Y-%m-%d)" \
+            --body-file pr-body.txt
