@@ -180,7 +180,7 @@ while (libvlc_media_player_get_state(mp) != libvlc_Stopped)
 libvlc_media_player_unlock(mp);
 ```
 
-The lock is recursive and safe to call from any thread. Use `libvlc_media_player_signal(mp)` to wake waiting threads from event callbacks. Note: `wait()` may spuriously wake up; always check the condition in a loop.
+`[4.x]` The lock is recursive and safe to call from any thread. Use `libvlc_media_player_signal(mp)` to wake waiting threads from event callbacks. Note: `wait()` may spuriously wake up; always check the condition in a loop.
 
 **`[4.x]` Watch Time API — precise time tracking:**
 
@@ -511,7 +511,7 @@ libvlc_media_get_stats(media, &stats);
 |----------|-------------|
 | `libvlc_media_get_mrl(media)` | Get MRL string (must free with `libvlc_free`) |
 | `libvlc_media_duplicate(media)` | Clone media object |
-| `libvlc_media_get_state(media)` | Get state: `NothingSpecial`, `Opening`, `Buffering`, `Playing`, `Paused`, `Stopped`, `Ended`, `Error`. `[4.x]` adds `Stopping`. |
+| `libvlc_media_get_state(media)` | `[3.x]` Get state: `NothingSpecial`, `Opening`, `Buffering`, `Playing`, `Paused`, `Stopped`, `Ended`, `Error`. Removed in 4.x (use `libvlc_media_player_get_state()` instead, which adds `Stopping`). |
 | `libvlc_media_get_duration(media)` | Duration in ms (-1 if unknown; parse first) |
 | `libvlc_media_get_type(media)` | `unknown`, `file`, `directory`, `disc`, `stream`, `playlist` |
 | `libvlc_media_subitems(media)` | Get sub-items as `libvlc_media_list_t` (for playlists, YouTube URLs, m3u8) |
@@ -523,7 +523,7 @@ libvlc_media_get_stats(media, &stats);
 
 **`[4.x]` Thumbnail Request API** — asynchronous thumbnail generation from media (without playing):
 ```c
-// Request a thumbnail at a specific time
+// [4.x] Request a thumbnail at a specific time
 libvlc_media_thumbnail_request_t *req =
     libvlc_media_thumbnail_request_by_time(inst, media,
         10000000,                          // time in us (10 seconds)
@@ -532,8 +532,10 @@ libvlc_media_thumbnail_request_t *req =
         false,                             // crop (false = fit)
         libvlc_picture_Png,                // output format
         5000);                             // timeout in ms
-// Or by position:
-// libvlc_media_thumbnail_request_by_pos(inst, media, 0.5, ...)
+// Or by position (same params as by_time, but with double pos instead of time):
+// libvlc_media_thumbnail_request_by_pos(inst, media, 0.5,
+//     libvlc_media_thumbnail_seek_fast, 320, 240, false,
+//     libvlc_picture_Png, 5000);
 
 // Listen for libvlc_MediaThumbnailGenerated event on media's event manager
 // The event provides a libvlc_picture_t*
@@ -580,7 +582,7 @@ The largest API surface (~123 C functions).
 | `libvlc_media_player_jump_time(mp, time)` | `[4.x]` Relative seek by `time` ms (positive = forward, negative = backward) |
 | `libvlc_media_player_set_rate(mp, rate)` | Playback speed (1.0 = normal, 2.0 = 2x) |
 | `libvlc_media_player_get_rate(mp)` | Get current rate |
-| `libvlc_media_player_will_play(mp)` | Can this media be played? |
+| `libvlc_media_player_will_play(mp)` | `[3.x]` Can this media be played? Removed in 4.x. |
 | `libvlc_media_player_is_seekable(mp)` | Is seeking supported? (`int` `[3.x]` / `bool` `[4.x]`) |
 | `libvlc_media_player_can_pause(mp)` | Is pausing supported? (`int` `[3.x]` / `bool` `[4.x]`) |
 | `libvlc_media_player_program_scrambled(mp)` | Is stream scrambled? |
@@ -596,7 +598,7 @@ The largest API surface (~123 C functions).
 | `libvlc_media_player_set_xwindow(mp, xid)` | Linux/X11 | Set X11 window ID |
 | `libvlc_media_player_set_nsobject(mp, view)` | macOS/iOS | Set `NSView*` / `UIView*`. `[4.x]` The view can implement `VLCDrawable` protocol for resize notifications and PictureInPicture support. |
 | `libvlc_media_player_set_android_context(mp, ctx)` | Android | Set Android `AWindow` context |
-| `libvlc_media_player_set_evas_object(mp, obj)` | Tizen/EFL | Set Evas object |
+| `libvlc_media_player_set_evas_object(mp, obj)` | Tizen/EFL | `[3.x]` Set Evas object. Removed in 4.x. |
 
 **Windows `WS_CLIPCHILDREN` requirement:** When embedding video in a Win32 window, the parent window **must** have the `WS_CLIPCHILDREN` style set. Without it, GDI repaints will overwrite the video surface, causing flickering or a blank/white area. Set it either in `CreateWindowEx` flags or dynamically before calling `set_hwnd`:
 ```c
@@ -1338,18 +1340,20 @@ libvlc_video_set_output_callbacks(mp,
 ### 3.14 A-B Loop API `[4.x]`
 
 ```c
-// Set A point at current time, then B point at another time
-libvlc_media_player_set_abloop(mp, libvlc_abloop_a, current_time_ms);
-libvlc_media_player_set_abloop(mp, libvlc_abloop_b, later_time_ms);
+// Set A-B loop by time (both points at once)
+libvlc_media_player_set_abloop_time(mp, a_time_ms, b_time_ms);
+
+// Or by position (0.0–1.0)
+libvlc_media_player_set_abloop_position(mp, 0.1, 0.5);
 
 // Query current loop state
-libvlc_abloop_t state;
-int64_t a_time, b_time;
-int ret = libvlc_media_player_get_abloop(mp, &state, &a_time, &b_time);
+libvlc_time_t a_time, b_time;
+double a_pos, b_pos;
+libvlc_abloop_t state = libvlc_media_player_get_abloop(mp, &a_time, &a_pos, &b_time, &b_pos);
 // state: libvlc_abloop_none, libvlc_abloop_a, libvlc_abloop_b
 
 // Clear loop
-libvlc_media_player_set_abloop(mp, libvlc_abloop_none, 0);
+libvlc_media_player_reset_abloop(mp);
 ```
 
 ### 3.15 Picture API `[4.x]`
@@ -2280,9 +2284,9 @@ async Task BrowseDirectory(Media directoryMedia)
 
 Track selection must happen **after** playback starts (tracks are discovered during demuxing). Wait for the `MediaPlayerPlaying` event or poll until tracks are available.
 
-**C — Enumerate and select tracks:**
+**C — Enumerate and select tracks `[3.x]`:**
 ```c
-// Wait until playing (tracks aren't available before playback starts)
+// [3.x] Wait until playing (tracks aren't available before playback starts)
 // Then enumerate audio tracks:
 libvlc_track_description_t *tracks = libvlc_audio_get_track_description(mp);
 for (libvlc_track_description_t *t = tracks; t != NULL; t = t->p_next) {
@@ -3529,7 +3533,7 @@ Quick reference for porting 3.x code to 4.x. See inline `[4.x]` / `[4.x change]`
 | `libvlc_media_new_path(inst, path)` | `libvlc_media_new_path(path)` | All `_new_*` media creators drop `inst` |
 | `libvlc_media_new_location(inst, mrl)` | `libvlc_media_new_location(mrl)` | |
 | `libvlc_media_new_fd(inst, fd)` | `libvlc_media_new_fd(fd)` | |
-| `libvlc_media_new_callbacks(inst, ...)` | `libvlc_media_new_callbacks(...)` | |
+| `libvlc_media_new_callbacks(inst, open, read, seek, close, opaque)` | `libvlc_media_new_callbacks(open, read, seek, close, opaque)` | |
 | `libvlc_media_new_as_node(inst, name)` | `libvlc_media_new_as_node(name)` | |
 | `libvlc_media_list_new(inst)` | `libvlc_media_list_new()` | |
 | `libvlc_media_player_new_from_media(media)` | `libvlc_media_player_new_from_media(inst, media)` | Swapped: inst added |
